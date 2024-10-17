@@ -1,33 +1,8 @@
 package com.redowan
 
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.SearchQuality
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addDubStatus
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.getDurationFromString
-import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAnimeSearchResponse
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.utils.AppUtils
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
-
-//suspend fun main() {
-//    val providerTester = com.lagradost.cloudstreamtest.ProviderTester(CircleFtpProvider())
-//    providerTester.testAll()
-////    providerTester.testMainPage(verbose = true)
-////    providerTester.testSearch(query = "gun",verbose = true)
-////    providerTester.testLoad("")
-//}
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 
 class CircleFtpProvider : MainAPI() {
     override var mainUrl = "http://new.circleftp.net"
@@ -68,21 +43,7 @@ class CircleFtpProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val json = try {
-            app.get(
-                "$mainApiUrl/api/posts?categoryExact=${request.data}&page=$page&order=desc&limit=10",
-                verify = false,
-                cacheTime = 60
-            )
-            // First try mainApiUrl
-        } catch (e: Exception) {
-            app.get(
-                "$apiUrl/api/posts?categoryExact=${request.data}&page=$page&order=desc&limit=10",
-                verify = false,
-                cacheTime = 60
-            )
-            // Fallback to apiUrl
-        }
+        val json = tryApiCall("$mainApiUrl/api/posts?categoryExact=${request.data}&page=$page&order=desc&limit=10")
         val home = AppUtils.parseJson<PageData>(json.text).posts.mapNotNull { post ->
             toSearchResult(post)
         }
@@ -110,112 +71,62 @@ class CircleFtpProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val json = try {
-            app.get(
-                "$mainApiUrl/api/posts?searchTerm=$query&order=desc",
-                verify = false,
-                cacheTime = 60
-            )
-            // First try mainApiUrl
-        } catch (e: Exception) {
-            app.get(
-                "$apiUrl/api/posts?searchTerm=$query&order=desc",
-                verify = false,
-                cacheTime = 60
-            )
-            // Fallback to apiUrl
-        }
+        val json = tryApiCall("$mainApiUrl/api/posts?searchTerm=$query&order=desc")
         return AppUtils.parseJson<PageData>(json.text).posts.mapNotNull { post ->
             toSearchResult(post)
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val json = try {
-            app.get(
-                url.replace("$mainUrl/content/", "$mainApiUrl/api/posts/"),
-                verify = false,
-                cacheTime = 60
-            )
-            // First try mainApiUrl
-        } catch (e: Exception) {
-            app.get(
-                url.replace("$mainUrl/content/", "$apiUrl/api/posts/"),
-                verify = false,
-                cacheTime = 60
-            )
-            // Fallback to apiUrl
-        }
-        val urlCheck = if (json.url.contains(mainApiUrl)) true else false
+        val json = tryApiCall(url.replace("$mainUrl/content/", "$mainApiUrl/api/posts/"))
+        val urlCheck = json.url.contains(mainApiUrl)
         val loadData = AppUtils.parseJson<Data>(json.text)
         val title = loadData.title
         val poster = "$apiUrl/uploads/${loadData.image}"
         val description = loadData.metaData
         val year = selectUntilNonInt(loadData.year)
 
-        if (loadData.type == "singleVideo") {
-            val movieUrl = json.parsed<Movies>().content
-            val link = if(urlCheck) movieUrl else linkToIp(movieUrl)
-            val duration =
-                getDurationFromString(loadData.watchTime)
-            return newMovieLoadResponse(title, url, TvType.Movie, link) {
+        return if (loadData.type == "singleVideo") {
+            val movieData = json.parsed<Movies>()
+            val link = if(urlCheck) movieData.content else linkToIp(movieData.content)
+            val duration = getDurationFromString(loadData.watchTime)
+            
+            val mediaData = MediaData(videoUrl = link ?: "")
+
+            newMovieLoadResponse(title, url, TvType.Movie, AppUtils.toJson(mediaData)) {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = description
                 this.duration = duration
+                addTrailer(movieData.trailer)
             }
         } else {
             val tvData = json.parsed<TvSeries>()
             val episodesData = mutableListOf<Episode>()
-            var seasonNum = 0
-            tvData.content.forEach { season ->
-                seasonNum++
-                var episodeNum = 0
-                season.episodes.forEach {
-                    episodeNum++
-                    val episodeUrl = it.link
+            tvData.content.forEachIndexed { seasonIndex, season ->
+                season.episodes.forEachIndexed { episodeIndex, episode ->
+                    val episodeUrl = episode.link
                     val link = if(urlCheck) episodeUrl else linkToIp(episodeUrl)
+                    
+                    val mediaData = MediaData(videoUrl = link)
+
                     episodesData.add(
                         Episode(
-                            link,
-                            name = null,
-                            seasonNum,
-                            episodeNum
+                            AppUtils.toJson(mediaData),
+                            episode.title,
+                            seasonIndex + 1,
+                            episodeIndex + 1
                         )
                     )
                 }
             }
-            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesData) {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = description
+                addTrailer(tvData.trailer)
             }
         }
-    }
-
-    private fun linkToIp(data: String?): String {
-        if (data != null) {
-            return when {
-                "index.circleftp.net" in data -> data.replace("index.circleftp.net", "15.1.4.2")
-                "index2.circleftp.net" in data -> data.replace("index2.circleftp.net", "15.1.4.5")
-                "index1.circleftp.net" in data -> data.replace("index1.circleftp.net", "15.1.4.9")
-                "ftp3.circleftp.net" in data -> data.replace("ftp3.circleftp.net", "15.1.4.7")
-                "ftp4.circleftp.net" in data -> data.replace("ftp4.circleftp.net", "15.1.1.5")
-                "ftp5.circleftp.net" in data -> data.replace("ftp5.circleftp.net", "15.1.1.15")
-                "ftp6.circleftp.net" in data -> data.replace("ftp6.circleftp.net", "15.1.2.3")
-                "ftp7.circleftp.net" in data -> data.replace("ftp7.circleftp.net", "15.1.4.8")
-                "ftp8.circleftp.net" in data -> data.replace("ftp8.circleftp.net", "15.1.2.2")
-                "ftp9.circleftp.net" in data -> data.replace("ftp9.circleftp.net", "15.1.2.12")
-                "ftp10.circleftp.net" in data -> data.replace("ftp10.circleftp.net", "15.1.4.3")
-                "ftp11.circleftp.net" in data -> data.replace("ftp11.circleftp.net", "15.1.2.6")
-                "ftp12.circleftp.net" in data -> data.replace("ftp12.circleftp.net", "15.1.2.1")
-                "ftp13.circleftp.net" in data -> data.replace("ftp13.circleftp.net", "15.1.1.18")
-                "ftp15.circleftp.net" in data -> data.replace("ftp15.circleftp.net", "15.1.4.12")
-                "ftp17.circleftp.net" in data -> data.replace("ftp17.circleftp.net", "15.1.3.8")
-                else -> data
-            }
-        }
-        else return ""
     }
 
     override suspend fun loadLinks(
@@ -224,84 +135,87 @@ class CircleFtpProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val mediaData = AppUtils.parseJson<MediaData>(data)
+        
         callback.invoke(
             ExtractorLink(
                 mainApiUrl,
                 this.name,
-                url = data,
+                url = mediaData.videoUrl,
                 mainApiUrl,
-                quality = getVideoQuality(data),
+                quality = getVideoQuality(mediaData.videoUrl),
                 isM3u8 = false,
-                isDash = false
+                isDash = false,
+                extraData = mapOf(
+                    "hasMultipleAudioTracks" to "true",
+                    "hasEmbeddedSubtitles" to "true"
+                )
             )
         )
         return true
     }
 
-    /**
-     * Extracts the initial numeric part of a string and returns it as an integer.
-     *
-     * @param string The input string.
-     * @return The initial numeric part as an integer, or `null` if the string doesn't start with a number or is null.
-     */
-    private fun selectUntilNonInt(string: String?): Int? {
-        return string?.let { Regex("^.*?(?=\\D|\$)").find(it)?.value?.toIntOrNull() }
-    }
-
-    /**
-     * Determines the search quality based on the presence of specific keywords in the input string.
-     *
-     * @param check The string to check for keywords.
-     * @return The corresponding `SearchQuality` enum value, or `null` if no match is found.
-     */
-    private fun getSearchQuality(check: String?): SearchQuality? {
-        val lowercaseCheck = check?.lowercase()
-        if (lowercaseCheck != null) {
-            return when {
-                lowercaseCheck.contains("webrip") || lowercaseCheck.contains("web-dl") -> SearchQuality.WebRip
-                lowercaseCheck.contains("bluray") -> SearchQuality.BlueRay
-                lowercaseCheck.contains("hdts") || lowercaseCheck.contains("hdcam") || lowercaseCheck.contains(
-                    "hdtc"
-                ) -> SearchQuality.HdCam
-
-                lowercaseCheck.contains("dvd") -> SearchQuality.DVD
-                lowercaseCheck.contains("cam") -> SearchQuality.Cam
-                lowercaseCheck.contains("camrip") || lowercaseCheck.contains("rip") -> SearchQuality.CamRip
-                lowercaseCheck.contains("hdrip") || lowercaseCheck.contains("hd") || lowercaseCheck.contains(
-                    "hdtv"
-                ) -> SearchQuality.HD
-
-                lowercaseCheck.contains("telesync") -> SearchQuality.Telesync
-                lowercaseCheck.contains("telecine") -> SearchQuality.Telecine
-                else -> null
+    private fun linkToIp(data: String?): String {
+        val replacements = mapOf(
+            "index.circleftp.net" to "15.1.4.2",
+            "index2.circleftp.net" to "15.1.4.5",
+            "index1.circleftp.net" to "15.1.4.9",
+            "ftp3.circleftp.net" to "15.1.4.7",
+            "ftp4.circleftp.net" to "15.1.1.5",
+            "ftp5.circleftp.net" to "15.1.1.15",
+            "ftp6.circleftp.net" to "15.1.2.3",
+            "ftp7.circleftp.net" to "15.1.4.8",
+            "ftp8.circleftp.net" to "15.1.2.2",
+            "ftp9.circleftp.net" to "15.1.2.12",
+            "ftp10.circleftp.net" to "15.1.4.3",
+            "ftp11.circleftp.net" to "15.1.2.6",
+            "ftp12.circleftp.net" to "15.1.2.1",
+            "ftp13.circleftp.net" to "15.1.1.18",
+            "ftp15.circleftp.net" to "15.1.4.12",
+            "ftp17.circleftp.net" to "15.1.3.8"
+        )
+        return data?.let { url ->
+            replacements.entries.fold(url) { acc, (key, value) ->
+                acc.replace(key, value)
             }
-        }
-        return null
+        } ?: ""
     }
 
-    /**
-     * Extracts the video resolution (in pixels) from a string.
-     *
-     * @param string The input string containing the resolution (e.g., "720p", "1080P").
-     * @return The resolution as an integer, or `Qualities.Unknown.value` if no resolution is found.
-     */
+    private fun selectUntilNonInt(string: String?): Int? {
+        return string?.let { Regex("^\\d+").find(it)?.value?.toIntOrNull() }
+    }
+
+    private fun getSearchQuality(check: String?): SearchQuality? {
+        return when {
+            check == null -> null
+            check.contains("webrip") || check.contains("web-dl") -> SearchQuality.WebRip
+            check.contains("bluray") -> SearchQuality.BlueRay
+            check.contains("hdts") || check.contains("hdcam") || check.contains("hdtc") -> SearchQuality.HdCam
+            check.contains("dvd") -> SearchQuality.DVD
+            check.contains("cam") -> SearchQuality.Cam
+            check.contains("camrip") || check.contains("rip") -> SearchQuality.CamRip
+            check.contains("hdrip") || check.contains("hd") || check.contains("hdtv") -> SearchQuality.HD
+            check.contains("telesync") -> SearchQuality.Telesync
+            check.contains("telecine") -> SearchQuality.Telecine
+            else -> null
+        }
+    }
+
     private fun getVideoQuality(string: String?): Int {
         return Regex("(\\d{3,4})[pP]").find(string ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?: Qualities.Unknown.value
     }
 
-    data class PageData(
-        val posts: List<Post>
-    )
+    private suspend fun tryApiCall(url: String): Response {
+        return try {
+            app.get(url, verify = false, cacheTime = 60)
+        } catch (e: Exception) {
+            app.get(url.replace(mainApiUrl, apiUrl), verify = false, cacheTime = 60)
+        }
+    }
 
-    data class Post(
-        val id: Int,
-        val type: String,
-        val imageSm: String,
-        val title: String,
-        val name: String?,
-    )
-
+    data class PageData(val posts: List<Post>)
+    data class Post(val id: Int, val type: String, val imageSm: String, val title: String, val name: String?)
     data class Data(
         val type: String,
         val imageSm: String,
@@ -313,23 +227,9 @@ class CircleFtpProvider : MainAPI() {
         val year: String?,
         val watchTime: String?
     )
-
-    data class TvSeries(
-        val content: List<Content>,
-    )
-
-    data class Content(
-        val episodes: List<EpisodeData>,
-        val seasonName: String
-    )
-
-    data class EpisodeData(
-        val link: String,
-        val title: String
-    )
-
-    data class Movies(
-        val content: String?
-    )
-
+    data class TvSeries(val content: List<Content>, val trailer: String?)
+    data class Content(val episodes: List<EpisodeData>, val seasonName: String)
+    data class EpisodeData(val link: String, val title: String)
+    data class Movies(val content: String?, val trailer: String?)
+    data class MediaData(val videoUrl: String)
 }
