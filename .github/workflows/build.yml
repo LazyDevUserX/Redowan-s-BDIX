@@ -1,4 +1,4 @@
-name: Build Single Plugin
+name: Build
 
 # https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#concurrency
 concurrency: 
@@ -41,14 +41,15 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v2
 
-      - name: Build BdixFTPBD Plugin
+      - name: Build All Plugins
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          # This command now only builds the "BdixFTPBD" plugin
-          ./gradlew :BdixFTPBD:make
-          # This now copies only the specific plugin's output file
-          cp BdixFTPBD/build/cloudstream/*.cs3 $GITHUB_WORKSPACE/builds
+          # This is the original, correct command to build everything
+          ./gradlew make makePluginsJson
+          # This copies all the generated plugins and the manifest file
+          cp **/build/cloudstream/*.cs3 $GITHUB_WORKSPACE/builds
+          cp build/plugins.json $GITHUB_WORKSPACE/builds
 
       - name: Push builds
         run: |
