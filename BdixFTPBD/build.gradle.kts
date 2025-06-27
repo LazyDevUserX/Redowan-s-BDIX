@@ -37,8 +37,7 @@ dependencies {
 // Cloudstream metadata block
 cloudstream {
     description = "A BDIX FTP provider for Cloudstream. Works even during internet shutdowns."
-    authors = listOf("YourName") // TODO: Change to your name or handle
-
+    authors = listOf("LazyDevUserX")
     /**
     * Status int as the following:
     * 0: Down
